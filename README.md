@@ -1,68 +1,28 @@
-# Raspberry Pi Bluetooth Music Player + Waveshare e-Paper
+# Raspberry Pi MP3 App (Split Services)
 
-This app runs on Raspberry Pi, reads music from `/media/music`, auto-connects Bluetooth devices, and plays tracks with VLC.
-It can also show status and current track on Waveshare 2.13" e-Paper pHAT (black/white, V4).
+This project is now split into separate services:
 
-## Files
+- `bluetooth_service.py` - keeps Bluetooth devices connected
+- `playback_service.py` - scans `/media/music` and plays tracks
+- `display_service.py` - renders app state to Waveshare 2.13" V4 e-paper
+- `shared_state.py` - shared JSON state in `/tmp/mp3_state.json`
 
-- `player.py`: main player app
-- `epaper_display.py`: optional Waveshare e-paper output
-- `run.sh`: helper run script
-- `requirements.txt`: Python dependencies
-
-## 1) Install packages on Raspberry Pi
+## Install on Raspberry Pi
 
 ```bash
 sudo apt update
 sudo apt install -y python3 python3-pip vlc bluez pulseaudio pulseaudio-module-bluetooth
+python3 -m pip install --upgrade pip
 python3 -m pip install -r requirements.txt
 ```
 
-GPIO/display related dependencies from your notes:
+Display dependencies:
 
 ```bash
-sudo apt-get update
-sudo apt install -y gpiod libgpiod-dev
-```
-
-Optional `lg` install:
-
-```bash
-wget https://github.com/joan2937/lg/archive/master.zip
-unzip master.zip
-cd lg-master
-make
-sudo make install
-```
-
-Optional `bcm2835` install:
-
-```bash
-wget http://www.airspayce.com/mikem/bcm2835/bcm2835-1.71.tar.gz
-tar zxvf bcm2835-1.71.tar.gz
-cd bcm2835-1.71/
-sudo ./configure && sudo make && sudo make check && sudo make install
-```
-
-Waveshare Python driver:
-
-```bash
+python3 -m pip install pillow spidev gpiozero lgpio
 git clone https://github.com/waveshare/e-Paper.git
 cp -r e-Paper/RaspberryPi_JetsonNano/python/lib/waveshare_epd .
 ```
-
-## 2) e-Paper Wiring (2.13" V4)
-
-Signal mapping:
-
-- VCC -> 3.3V
-- GND -> GND
-- DIN -> MOSI (Board pin 19)
-- CLK -> SCLK (Board pin 23)
-- CS -> CE0 (Board pin 24)
-- DC -> BCM25 (Board pin 22)
-- RST -> BCM17 (Board pin 11)
-- BUSY -> BCM24 (Board pin 18)
 
 Enable SPI:
 
@@ -72,19 +32,18 @@ sudo raspi-config
 sudo reboot
 ```
 
-## 3) Prepare music folder
+## Waveshare 2.13" V4 Wiring
 
-Put music files under:
+- VCC -> 3.3V
+- GND -> GND
+- DIN -> MOSI (pin 19)
+- CLK -> SCLK (pin 23)
+- CS -> CE0 (pin 24)
+- DC -> BCM25 (pin 22)
+- RST -> BCM17 (pin 11)
+- BUSY -> BCM24 (pin 18)
 
-```bash
-/media/music
-```
-
-Supported formats: `.mp3`, `.wav`, `.flac`, `.ogg`, `.m4a`, `.aac`.
-
-## 4) Pair Bluetooth devices once
-
-You only need this once. After that, app auto-connects paired devices.
+## Pair Bluetooth once
 
 ```bash
 bluetoothctl
@@ -92,52 +51,89 @@ power on
 agent on
 default-agent
 scan on
-# wait until you see your device
+# put headphones in pairing mode
 pair AA:BB:CC:DD:EE:FF
 trust AA:BB:CC:DD:EE:FF
 quit
 ```
 
-## 5) Run
-
-Auto-connect all paired devices (recommended for no-button setup):
+## Run all services together
 
 ```bash
 chmod +x run.sh
 ./run.sh
 ```
 
-Or force one specific device:
+Optional fixed device:
 
 ```bash
 ./run.sh AA:BB:CC:DD:EE:FF
 ```
 
-Direct command:
+## Run services individually
 
 ```bash
-python3 player.py --music-dir /media/music --shuffle --epd
+python3 bluetooth_service.py
+python3 playback_service.py --music-dir /media/music --shuffle --loop
+python3 display_service.py
 ```
 
-## Optional: Start at boot (systemd)
+## Systemd (recommended for boot)
 
-Create service:
+Create 3 units:
 
-```bash
-sudo nano /etc/systemd/system/mp3-player.service
-```
+- `/etc/systemd/system/mp3-bluetooth.service`
+- `/etc/systemd/system/mp3-playback.service`
+- `/etc/systemd/system/mp3-display.service`
 
-Example service:
+`mp3-bluetooth.service`:
 
 ```ini
 [Unit]
-Description=Bluetooth MP3 Player
-After=bluetooth.target sound.target network.target
+Description=MP3 Bluetooth Service
+After=bluetooth.target network.target
 
 [Service]
 Type=simple
 WorkingDirectory=/home/pi/mp3
-ExecStart=/usr/bin/python3 /home/pi/mp3/player.py --music-dir /media/music --shuffle --epd
+ExecStart=/usr/bin/python3 /home/pi/mp3/bluetooth_service.py
+Restart=always
+User=pi
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`mp3-playback.service`:
+
+```ini
+[Unit]
+Description=MP3 Playback Service
+After=sound.target mp3-bluetooth.service
+Requires=mp3-bluetooth.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/mp3
+ExecStart=/usr/bin/python3 /home/pi/mp3/playback_service.py --music-dir /media/music --shuffle --loop
+Restart=always
+User=pi
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`mp3-display.service`:
+
+```ini
+[Unit]
+Description=MP3 E-Paper Display Service
+After=mp3-playback.service mp3-bluetooth.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/mp3
+ExecStart=/usr/bin/python3 /home/pi/mp3/display_service.py
 Restart=always
 User=pi
 
@@ -149,13 +145,6 @@ Enable:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable mp3-player.service
-sudo systemctl start mp3-player.service
-sudo systemctl status mp3-player.service
+sudo systemctl enable mp3-bluetooth.service mp3-playback.service mp3-display.service
+sudo systemctl start mp3-bluetooth.service mp3-playback.service mp3-display.service
 ```
-
-## Notes
-
-- No button is required: app auto-connects all paired Bluetooth devices.
-- If auto-connect fails, open `bluetoothctl` and verify devices are paired/trusted.
-- If e-paper stays blank, verify SPI is enabled and wiring is correct.
