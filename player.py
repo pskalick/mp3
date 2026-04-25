@@ -72,6 +72,33 @@ def connect_bluetooth(mac_address: str, retries: int, retry_delay_sec: int) -> b
     return False
 
 
+def list_paired_devices() -> List[str]:
+    result = run_command(["bluetoothctl", "devices", "Paired"], check=False)
+    devices: List[str] = []
+    for line in result.stdout.splitlines():
+        # Expected format: "Device AA:BB:CC:DD:EE:FF Device Name"
+        parts = line.strip().split()
+        if len(parts) >= 2 and parts[0] == "Device":
+            devices.append(parts[1])
+    return devices
+
+
+def connect_all_paired_devices(retries: int, retry_delay_sec: int) -> bool:
+    ensure_command_exists("bluetoothctl")
+    devices = list_paired_devices()
+    if not devices:
+        print("No paired Bluetooth devices found.", file=sys.stderr)
+        return False
+
+    print(f"Trying auto-connect for {len(devices)} paired Bluetooth device(s).")
+    at_least_one_connected = False
+    for mac_address in devices:
+        connected = connect_bluetooth(mac_address, retries, retry_delay_sec)
+        at_least_one_connected = at_least_one_connected or connected
+
+    return at_least_one_connected
+
+
 def play_tracks_loop(
     tracks: List[Path], shuffle: bool, epaper: Optional[EpaperDisplay] = None
 ) -> None:
@@ -127,8 +154,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--bt-mac",
-        required=True,
-        help="Bluetooth MAC address of headphones (example: AA:BB:CC:DD:EE:FF)",
+        default=None,
+        help="Bluetooth MAC address of headphones (optional). If omitted, all paired devices are auto-connected.",
     )
     parser.add_argument(
         "--retries",
@@ -175,7 +202,10 @@ def main() -> None:
     if epaper.ready:
         epaper.show("MP3 Player", [f"Tracks: {len(tracks)}", "Bluetooth connect..."])
 
-    connected = connect_bluetooth(args.bt_mac, args.retries, args.retry_delay)
+    if args.bt_mac:
+        connected = connect_bluetooth(args.bt_mac, args.retries, args.retry_delay)
+    else:
+        connected = connect_all_paired_devices(args.retries, args.retry_delay)
     if not connected:
         if epaper.ready:
             epaper.show("MP3 Player", ["Bluetooth failed"])
